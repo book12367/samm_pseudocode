@@ -1,0 +1,221 @@
+Algorithm: SAMM Data Preprocessing Algorithm
+
+// Main preprocessing flow
+main_preprocessing_function():
+    // 1. Read Excel label file
+    excel_data_path = r'F:\LW\SAMM\SAMM_Micro_FACS_Codes_v2.xlsx'
+    label_data = read_excel_labels(excel_data_path)
+    
+    // 2. Validate video files
+    video_dir = r'E:\LW\SAMM_videos'
+    validation_results = validate_video_files(video_dir, label_data)
+    
+    // 3. Check video properties
+    video_properties = check_video_properties(video_dir)
+    
+    // 4. Check frame numbers
+    frame_info = check_frame_numbers(video_dir)
+    
+    // 5. Data format conversion (if needed)
+    // Convert SAMM format to video format
+    convert_samm_to_video()
+    
+    return {
+        label_data: label_data,
+        validation_results: validation_results,
+        video_properties: video_properties,
+        frame_info: frame_info
+    }
+
+// Read Excel label file function
+read_excel_labels(file_path):
+    try:
+        // Get all sheets in the Excel file
+        excel_file = pd.ExcelFile(file_path)
+        sheet_names = excel_file.sheet_names
+        
+        // Read 'MICRO_ONLY' sheet, skipping first 15 rows of header information
+        df = excel_file.parse('MICRO_ONLY', skiprows=15)
+        
+        // Rename columns for readability
+        df.rename_columns({
+            df.column_names[0]: 'Subject',
+            df.column_names[1]: 'Filename',
+            df.column_names[2]: 'OnsetFrame',
+            df.column_names[3]: 'ApexFrame', 
+            df.column_names[4]: 'OffsetFrame',
+            df.column_names[5]: 'Duration',
+            df.column_names[6]: 'Object',
+            df.column_names[7]: 'Micro/Exp',
+            df.column_names[8]: 'FACS',
+            df.column_names[9]: 'Emotion',
+            df.column_names[10]: 'Valence',
+            df.column_names[11]: 'Notes'
+        }, inplace=true)
+        
+        return df
+    except Exception as e:
+        print(f"Error reading Excel file: {e}")
+        return null
+
+// Validate video file existence function
+validate_video_files(video_dir, label_data):
+    results = {
+        found_videos: [],
+        missing_videos: []
+    }
+    
+    if label_data is not null:
+        filename_list = label_data['Filename'].tolist()
+        
+        for filename in filename_list:
+            // Construct video path based on emotion category
+            emotion_category = label_data[label_data['Filename'] == filename]['Emotion'].iloc[0]
+            video_path = os.path.join(video_dir, emotion_category, f'{filename}.mp4')
+            
+            if os.path.exists(video_path):
+                results['found_videos'].append(video_path)
+            else:
+                results['missing_videos'].append(video_path)
+    
+    return results
+
+// Check video properties function
+check_video_properties(video_dir):
+    properties_info = []
+    
+    // Iterate through all subdirectories (emotion categories) in video directory
+    emotion_categories = os.listdir(video_dir)
+    
+    for emotion_category in emotion_categories:
+        emotion_dir = os.path.join(video_dir, emotion_category)
+        if os.path.isdir(emotion_dir):
+            video_file_list = [f for f in os.listdir(emotion_dir) if f.lower().endswith('.mp4')]
+            
+            for video_file in video_file_list:
+                video_path = os.path.join(emotion_dir, video_file)
+                
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened() is true:
+                    total_frames = integer(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    width = integer(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = integer(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    
+                    properties_info.append({
+                        'video_path': video_path,
+                        'total_frames': total_frames,
+                        'fps': fps,
+                        'resolution': f'{width}x{height}'
+                    })
+                    
+                    cap.release()
+    
+    return properties_info
+
+// Check frame numbers function
+check_frame_numbers(video_dir):
+    frame_info = []
+    
+    // Iterate through all subdirectories (emotion categories) in video directory
+    emotion_categories = os.listdir(video_dir)
+    
+    for emotion_category in emotion_categories:
+        emotion_dir = os.path.join(video_dir, emotion_category)
+        if os.path.isdir(emotion_dir):
+            video_file_list = [f for f in os.listdir(emotion_dir) if f.lower().endswith('.mp4')]
+            
+            for video_file in video_file_list:
+                video_path = os.path.join(emotion_dir, video_file)
+                
+                cap = cv2.VideoCapture(video_path)
+                if cap.isOpened() is true:
+                    total_frames = integer(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    
+                    frame_info.append({
+                        'video_file': video_file,
+                        'total_frames': total_frames
+                    })
+                    
+                    cap.release()
+    
+    return frame_info
+
+// Convert SAMM to video format function
+convert_samm_to_video():
+    // Create videos from image frames
+    samm_image_dir = r'F:\LW\SAMM'
+    output_video_dir = r'E:\LW\SAMM_videos'
+    
+    // Get all subject directories
+    subject_list = os.listdir(samm_image_dir)
+    
+    for subject in subject_list:
+        subject_path = os.path.join(samm_image_dir, subject)
+        if os.path.isdir(subject_path):
+            // Get all video sequences for this subject
+            sequence_list = os.listdir(subject_path)
+            
+            for sequence in sequence_list:
+                sequence_path = os.path.join(subject_path, sequence)
+                if os.path.isdir(sequence_path):
+                    // Get all image frames for this sequence
+                    image_file_list = []
+                    for extension in ['.jpg', '.jpeg', '.png', '.bmp']:
+                        image_file_list.extend(list(Path(sequence_path).glob(f'*{extension}')))
+                        image_file_list.extend(list(Path(sequence_path).glob(f'*{extension.upper()}')))
+                    
+                    // Sort image files numerically based on filename
+                    image_file_list = sorted(image_file_list, key=lambda x: integer(''.join(filter(str.isdigit, x.name))))
+                    
+                    if length(image_file_list) > 0:
+                        // Read first image to get dimensions
+                        first_image = cv2.imread(string(image_file_list[0]))
+                        height, width, channels = first_image.shape
+                        
+                        // Create video writer (assuming 30 FPS)
+                        output_video_path = os.path.join(output_video_dir, sequence + '.mp4')
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        video_writer = cv2.VideoWriter(output_video_path, fourcc, 30.0, (width, height))
+                        
+                        for image_file in image_file_list:
+                            image = cv2.imread(string(image_file))
+                            video_writer.write(image)
+                        
+                        video_writer.release()
+
+// Data cleaning function
+data_cleaning(raw_data):
+    cleaned_data = raw_data.copy()
+    
+    // Remove null values
+    cleaned_data = cleaned_data.dropna()
+    
+    // Remove duplicates
+    cleaned_data = cleaned_data.drop_duplicates()
+    
+    // Data type conversion
+    numeric_columns = ['OnsetFrame', 'ApexFrame', 'OffsetFrame', 'Duration', 'Valence']
+    for column in numeric_columns:
+        if column in cleaned_data.column_names:
+            cleaned_data[column] = pd.to_numeric(cleaned_data[column], errors='coerce')
+    
+    // Filter outliers
+    cleaned_data = cleaned_data[cleaned_data['Duration'] > 0]  // Duration should be greater than 0
+    cleaned_data = cleaned_data[cleaned_data['OnsetFrame'] >= 0]  // Frame numbers should be non-negative
+    
+    return cleaned_data
+
+// Data normalization function
+data_normalization(data):
+    normalized_data = data.copy()
+    
+    // Normalize numeric columns
+    numeric_columns = ['OnsetFrame', 'ApexFrame', 'OffsetFrame', 'Duration']
+    for column in numeric_columns:
+        if column in normalized_data.column_names:
+            mean_val = normalized_data[column].mean()
+            std_val = normalized_data[column].std()
+            normalized_data[column] = (normalized_data[column] - mean_val) / (std_val + 1e-8)  // Avoid division by zero
+    
+    return normalized_data
