@@ -1,0 +1,225 @@
+Algorithm: SAMM Micro-expression Recognition Model Inference Algorithm
+
+// Global configuration parameters
+CONFIG = {
+    data_dir: "E:\\LW\\SAMM_videos",         // Dataset path
+    use_refined_landmarks: true,            // Whether to use refined landmarks (false=468, true=478)
+    target_length: 20,                      // Unified sequence length
+    batch_size: 2,                         // Training batch size
+    epochs: 100,                           // Maximum training epochs
+    model_path: "me_model_tf.h5",          // Model save path
+    min_frames: 10,                        // Minimum frames for real-time detection
+    is_training: false,                    // Whether in training mode
+    AugTimes: 5                            // Data augmentation times, effective in training mode
+}
+
+// Calculate input dimensions
+LANDMARK_POINTS = 478 if CONFIG["use_refined_landmarks"] is true else 468
+CONFIG["input_shape"] = (CONFIG["target_length"], LANDMARK_POINTS * 3)
+
+// Feature Extractor Class (for inference)
+class FeatureExtractor:
+    initialize():
+        face_mesh = mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=false,
+            max_num_faces=1,
+            refine_landmarks=CONFIG["use_refined_landmarks"],
+            min_detection_confidence=0.5)
+    
+    process_video(video_path):
+        cap = cv2.VideoCapture(video_path)
+        landmarks_seq = []
+        
+        while cap.isOpened() is true:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            results = face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if results.multi_face_landmarks exists:
+                landmarks = array([[lm.x, lm.y, lm.z]
+                                    for lm in results.multi_face_landmarks[0].landmark])
+                landmarks_seq.append(landmarks.flatten())
+            else:
+                // Record frames where face was not detected
+                continue
+        
+        cap.release()
+        return array(landmarks_seq)
+
+// Sequence Processor Class (for inference)
+class SequenceProcessor:
+    initialize():
+        target_length = CONFIG["target_length"]
+        selected_indices = [x for x in range(LANDMARK_POINTS)]
+    
+    align_sequence(sequence):
+        if sequence.length() < 2:
+            return zeros((target_length, sequence.shape[1]))
+        
+        // Extract keypoint features for DTW alignment
+        selected_features = sequence[:, selected_indices].reshape(length(sequence), -1)
+        
+        // Generate reference sequence (using linear interpolation)
+        original_length = length(sequence)
+        x_orig = linspace(0, 1, original_length)
+        x_new = linspace(0, 1, target_length)
+        R_selected = zeros((target_length, selected_features.shape[1]))
+        
+        for dim in range(selected_features.shape[1]):
+            f = interp_function(x_orig, selected_features[:, dim], type='linear', fill_value="extrapolate")
+            R_selected[:, dim] = f(x_new)
+        
+        // Calculate DTW path
+        _, path = fast_dtw(selected_features, R_selected, distance=euclidean_distance)
+        
+        // Build aligned sequence based on path
+        aligned = zeros((target_length, sequence.shape[1]))
+        counts = zeros(target_length)
+        
+        for s_idx, r_idx in path:
+            aligned[r_idx] += sequence[s_idx]
+            counts[r_idx] += 1
+        
+        // Process unaligned positions and normalize
+        counts[counts == 0] = 1  // Avoid division by zero
+        aligned /= counts[:, new_axis]
+        
+        return aligned
+    
+    normalize(sequence):
+        mean_val = mean(sequence, axis=0)
+        std_val = std(sequence, axis=0)
+        return (sequence - mean_val) / (std_val + 1e-8)
+    
+    process(sequence):
+        processed = align_sequence(sequence)
+        return normalize(processed)
+
+// Load Label Function
+load_label():
+    global classes  // Declare as global variable for other functions to use
+    
+    categories = sorted([d for d in listdir(CONFIG["data_dir"])
+                        if os.path.isdir(joinpath(CONFIG["data_dir"], d))])
+    label_encoder = LabelEncoder().fit(categories)
+    classes = label_encoder.classes_
+
+// Single Video Detection Function
+detect_single_video(video_path, model_path=null, show_processing=true):
+    // Initialize configuration
+    model_path = model_path or CONFIG["model_path"]
+    extractor = FeatureExtractor()
+    processor = SequenceProcessor()
+    
+    // Result dictionary
+    result = {
+        "status": "success",
+        "predicted_class": null,
+        "confidence": 0.0,
+        "class_probabilities": {},
+        "error": null,
+        "warning": []
+    }
+    
+    try:
+        // Check file existence
+        if not os.path.exists(video_path):
+            throw FileNotFoundError(f"Video file does not exist: {video_path}")
+        
+        // Load model
+        if not os.path.exists(model_path):
+            throw ValueError(f"Model file does not exist: {model_path}")
+        model = tf.keras.models.load_model(model_path)
+        
+        // Process video
+        cap = cv2.VideoCapture(video_path)
+        total_frames = integer(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        landmarks_seq = []
+        missed_frames = 0
+        
+        // Process with progress bar
+        progress = tqdm(total=total_frames, desc="Processing video frames", disable=not show_processing)
+        while cap.isOpened() is true:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            // Face landmark detection
+            results = extractor.face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            if results.multi_face_landmarks exists:
+                landmarks = array([[lm.x, lm.y, lm.z]
+                                    for lm in results.multi_face_landmarks[0].landmark])
+                landmarks_seq.append(landmarks.flatten())
+            else:
+                missed_frames += 1
+            
+            progress.update(1)
+        cap.release()
+        progress.close()
+        
+        // Check valid frame count
+        if length(landmarks_seq) < CONFIG["min_frames"]:
+            throw ValueError("Insufficient valid frames for analysis")
+        
+        // Process sequence
+        aligned_seq = processor.align_sequence(array(landmarks_seq))
+        processed_seq = processor.normalize(aligned_seq)
+        
+        // Execute prediction
+        predictions = model.predict(processed_seq[new_axis, ...], verbose=0)[0]
+        predicted_idx = argmax(predictions)
+        
+        // Build result
+        result.update({
+            "predicted_class": classes[predicted_idx],
+            "confidence": float(max(predictions)),
+            "class_probabilities": {cls: float(prob) for cls, prob in zip(classes, predictions)},
+            "warning": [f"Detected {missed_frames} missed frames"] if missed_frames > 0 else []
+        })
+    
+    except Exception as e:
+        result.update({
+            "status": "error",
+            "error": str(e)
+        })
+    
+    // Add diagnostic information
+    result["diagnostics"] = {
+        "video_path": video_path,
+        "total_frames": total_frames,
+        "valid_frames": length(landmarks_seq),
+        "processing_time": progress.format_dict["elapsed"] if show_processing else null
+    }
+    
+    return result
+
+// Main Execution Flow
+main_function():
+    // Load class labels
+    load_label()
+    
+    // Execute detection
+    start_time = time.time()
+    test_result = detect_single_video(
+        video_path=r"E:\LW\SAMM_videos\Contempt\014_5_2.mp4",
+        show_processing=true
+    )
+    print("Detection time:", time.time() - start_time)
+    
+    // Print results
+    print("\nDetection results:")
+    if test_result["status"] == "success":
+        print(f"Predicted class: {test_result['predicted_class']}")
+        print(f"Confidence: {test_result['confidence']:.2%}")
+        print("\nDetailed probability distribution:")
+        for cls, prob in test_result["class_probabilities"].items():
+            print(f"  {cls}: {prob:.2%}")
+    else:
+        print(f"Detection failed: {test_result['error']}")
+    
+    // Display warning messages
+    if test_result["warning"]:
+        print("\nWarning messages:")
+        for warn in test_result["warning"]:
+            print(f"  - {warn}")
